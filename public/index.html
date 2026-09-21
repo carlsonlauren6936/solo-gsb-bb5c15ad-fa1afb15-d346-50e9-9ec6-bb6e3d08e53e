@@ -56,7 +56,35 @@
       </section>
 
       <section class="card">
-        <h2>3. 方案存取</h2>
+        <h2>3. 自动拼版</h2>
+        <p class="hint">全部折叠步骤合法且收成单叠后，按封面→封底的阅读槽位连续填码，
+          并反向映射到各原始纸格的正/反面。预览不会改动当前标注，确认后才批量写入。</p>
+        <div class="row wrap">
+          <label>起始页码
+            <input id="imposeStart" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>成品页数
+            <input id="imposeCount" type="number" min="1" step="1" value="0" />
+          </label>
+          <button id="imposeGenerateBtn">生成拼版预览</button>
+        </div>
+        <div id="imposeCapacity" class="hint"></div>
+        <div id="imposeMsg" class="error-box" hidden></div>
+        <div id="imposePreview" class="impose-preview" hidden>
+          <div id="imposeSummary" class="hint"></div>
+          <div id="imposeOverwrite" class="impose-overwrite"></div>
+          <div class="impose-table-wrap">
+            <table id="imposeTable" class="impose-table"></table>
+          </div>
+          <div class="row right">
+            <button id="imposeCancelBtn">取消</button>
+            <button id="imposeConfirmBtn" class="primary">确认写入标注</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. 方案存取</h2>
         <div class="row wrap">
           <button id="saveBtn" class="primary">保存到服务器</button>
           <button id="exportBtn">导出 JSON</button>

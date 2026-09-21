@@ -15,7 +15,8 @@ const app = {
   hitHandles: [],           // 画布折叠手柄
   hoverHandle: null,
   editingCell: null,
-  playTimer: null
+  playTimer: null,
+  imposition: null          // 最近一次生成的自动拼版结果（未确认写入）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +40,7 @@ function init() {
   $('clearStepsBtn').addEventListener('click', () => {
     if (!app.plan.steps.length) return;
     app.plan.steps = [];
+    clearImposition();
     setUpto(0, true);
   });
 
@@ -51,6 +53,12 @@ function init() {
 
   $('editorCancel').addEventListener('click', () => $('cellEditor').hidden = true);
   $('editorOk').addEventListener('click', commitEditor);
+
+  $('imposeGenerateBtn').addEventListener('click', generateImposition);
+  $('imposeConfirmBtn').addEventListener('click', confirmImposition);
+  $('imposeCancelBtn').addEventListener('click', clearImposition);
+  $('imposeStart').addEventListener('input', clearImposition);
+  $('imposeCount').addEventListener('input', clearImposition);
 
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
@@ -67,6 +75,8 @@ function createGrid() {
   const cols = clampInt($('colsInput').value, 1, 12, 2);
   app.plan = { name: $('planName').value || '未命名方案', rows, cols, labels: {}, steps: [] };
   app.loadedId = null;
+  clearImposition();
+  $('imposeCount').value = String(rows * cols * 2);
   setUpto(0, true);
   refreshLineSelect();
 }
@@ -129,6 +139,7 @@ function requestStep(step) {
   }
   app.plan.steps.push(step);
   clearFoldError();
+  clearImposition();
   setUpto(app.plan.steps.length, true);
 }
 
@@ -143,6 +154,7 @@ function flashConflict(err) {
 
 function truncateSteps() {
   app.plan.steps = app.plan.steps.slice(0, app.upto);
+  clearImposition();
   setUpto(app.plan.steps.length, true);
 }
 
@@ -208,6 +220,8 @@ function renderControls() {
     if (info.folded) { badge.className = 'badge ok'; badge.textContent = '已收成单叠'; }
     else { badge.className = 'badge idle'; badge.textContent = `${info.stacks.length} 个叠层`; }
   } else { badge.className = 'badge idle'; badge.textContent = ''; }
+
+  refreshImpositionControls();
 }
 
 function renderSteps() {
@@ -597,6 +611,172 @@ function commitEditor() {
     else delete app.plan.labels[key];
   });
   $('cellEditor').hidden = true;
+  clearImposition();
+  render();
+}
+
+// ---------- 自动拼版 ----------
+/**
+ * 判定当前方案是否允许生成拼版。
+ * @returns { eligible:boolean, reason:string, capacity:number }
+ */
+function impositionEligibility() {
+  if (!app.plan.rows) return { eligible: false, reason: '请先创建行列纸格。', capacity: 0 };
+  const capacity = app.plan.rows * app.plan.cols * 2;
+  const r = E.replay(app.plan.rows, app.plan.cols, {}, app.plan.steps);
+  if (r.error) {
+    return {
+      eligible: false,
+      reason: `第 ${r.error.stepIndex + 1} 步非法（${r.error.code === 'thickness' ? '厚度不一致' : '折线不在外轮廓'}）：${r.error.message}`,
+      capacity
+    };
+  }
+  const info = E.pageSequence(r.state);
+  if (!info.folded) {
+    return {
+      eligible: false,
+      reason: app.plan.steps.length
+        ? `尚未收成单叠：当前仍有 ${info.stacks.length} 个分离叠层。`
+        : `尚未折叠：当前有 ${info.stacks.length} 个分离叠层（单格纸无需折叠即可拼版）。`,
+      capacity
+    };
+  }
+  return { eligible: true, reason: '', capacity };
+}
+
+function refreshImpositionControls() {
+  const { eligible, reason, capacity } = impositionEligibility();
+  $('imposeCapacity').textContent = app.plan.rows
+    ? `纸格总面数（容量）：${capacity} 面；成品页数须 ≤ ${capacity}。`
+    : '';
+  $('imposeGenerateBtn').disabled = !eligible;
+  $('imposeGenerateBtn').title = eligible ? '' : reason;
+}
+
+function showImpositionError(msg) {
+  const box = $('imposeMsg');
+  box.hidden = false;
+  box.textContent = '⛔ ' + msg;
+}
+function clearImpositionError() { $('imposeMsg').hidden = true; }
+
+/** 方案任何实质变更（建格/步骤/标注/载入）后调用：作废尚未写入的预览 */
+function clearImposition() {
+  app.imposition = null;
+  $('imposePreview').hidden = true;
+  clearImpositionError();
+}
+
+/** 读取并规整起始页码与成品页数输入 */
+function readImpositionInputs(capacity) {
+  const startRaw = $('imposeStart').value.trim();
+  const countRaw = $('imposeCount').value.trim();
+  const startPage = Math.floor(Number(startRaw));
+  const pageCount = Math.floor(Number(countRaw));
+  if (startRaw === '' || !Number.isInteger(startPage) || startPage < 1) {
+    return { error: '起始页码必须是不小于 1 的整数。' };
+  }
+  if (countRaw === '' || !Number.isInteger(pageCount) || pageCount < 1) {
+    return { error: '成品页数必须是不小于 1 的整数。' };
+  }
+  if (pageCount > capacity) {
+    return { error: `成品页数 ${pageCount} 超出纸格总面数 ${capacity}。` };
+  }
+  return { startPage, pageCount };
+}
+
+function generateImposition() {
+  const { eligible, reason, capacity } = impositionEligibility();
+  if (!eligible) { showImpositionError(reason); return; }
+  const parsed = readImpositionInputs(capacity);
+  if (parsed.error) { showImpositionError(parsed.error); return; }
+
+  const r = E.autoImpose({
+    rows: app.plan.rows,
+    cols: app.plan.cols,
+    steps: app.plan.steps,
+    startPage: parsed.startPage,
+    pageCount: parsed.pageCount,
+    existingLabels: app.plan.labels
+  });
+  if (!r.ok) { showImpositionError(r.error.message); return; }
+
+  clearImpositionError();
+  app.imposition = r;
+  renderImpositionPreview();
+}
+
+function renderImpositionPreview() {
+  const r = app.imposition;
+  const box = $('imposePreview');
+  box.hidden = false;
+
+  const blankCount = r.slots.length - r.pageCount;
+  $('imposeSummary').textContent =
+    `预览（尚未写入）：${r.pageCount} 页，页码 ${r.startPage}–${r.startPage + r.pageCount - 1}；`
+    + `共 ${r.capacity} 个阅读槽位（封面→封底），末尾 ${blankCount} 槽留空。`;
+
+  // —— 覆盖汇总 ——
+  const ow = $('imposeOverwrite');
+  ow.innerHTML = '';
+  if (!r.overwrites.length) {
+    ow.innerHTML = '<span class="ow-none">现有标注为空或与拼版结果一致：本次写入不会覆盖任何已填页码。</span>';
+  } else {
+    const head = document.createElement('div');
+    head.className = 'ow-head';
+    head.textContent = `确认后将覆盖/清空 ${r.overwrites.length} 个已标注的面：`;
+    const ul = document.createElement('ul');
+    r.overwrites.forEach((o) => {
+      const li = document.createElement('li');
+      const faceText = o.face === 'front' ? '正面' : '反面';
+      const from = o.from === '' ? '空白' : `“${escapeHtml(o.from)}”`;
+      const to = o.to === '' ? '空白' : `“${escapeHtml(o.to)}”`;
+      li.innerHTML = `纸格 (${o.panelId}) ${faceText}：${from} → ${to}`
+        + `（阅读槽位 ${o.slotIndex + 1}）`;
+      ul.appendChild(li);
+    });
+    ow.appendChild(head);
+    ow.appendChild(ul);
+  }
+
+  // —— 槽位明细：阅读槽位 → 原始纸格/面 ——
+  const table = $('imposeTable');
+  table.innerHTML = '';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>槽位</th><th>页码</th><th>原始纸格</th><th>面</th><th>朝向</th></tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  const overwrittenKeys = new Set(r.overwrites.map((o) => `${o.panelId}:${o.face}`));
+  r.slots.forEach((slot) => {
+    const tr = document.createElement('tr');
+    if (slot.blank) tr.classList.add('blank-row');
+    if (overwrittenKeys.has(`${slot.panelId}:${slot.face}`)) tr.classList.add('overwritten');
+    const faceText = slot.face === 'front' ? '正面' : '反面';
+    const pageCell = slot.blank
+      ? `<b>空白</b>（无页）`
+      : `<b>${escapeHtml(slot.label)}</b>`;
+    tr.innerHTML =
+      `<td>${slot.index + 1}</td>`
+      + `<td>${pageCell}</td>`
+      + `<td>(${escapeHtml(slot.panelId)})</td>`
+      + `<td class="face-${slot.face}">${faceText}</td>`
+      + `<td>${slot.upright ? '正立' : '<span class="inverted-mark">⟲ 倒置 180°</span>'}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+/** 用户确认后才批量写入 labels */
+function confirmImposition() {
+  const r = app.imposition;
+  if (!r) return;
+  // 整体替换：未列出的纸格（两面皆空）一并删除
+  app.plan.labels = JSON.parse(JSON.stringify(r.labels));
+  const n = Object.keys(r.labels).length;
+  clearImposition();
+  $('saveMsg').textContent =
+    `自动拼版已写入 ${n} 个纸格的正/反面页码（${r.pageCount} 页`
+    + (r.pageCount < r.capacity ? `，末尾 ${r.capacity - r.pageCount} 槽留空` : '') + '）。';
   render();
 }
 
@@ -629,6 +809,9 @@ function applyPlan(plan, id) {
   $('planName').value = p.name;
   $('rowsInput').value = p.rows;
   $('colsInput').value = p.cols;
+  $('imposeStart').value = '1';
+  $('imposeCount').value = String(p.rows * p.cols * 2);
+  clearImposition();
   refreshLineSelect();
   setUpto(p.steps.length, true);
   $('deletePlanBtn').hidden = !id;
@@ -722,6 +905,8 @@ init();
 // 暴露给自动化检查（浏览器中无害）
 if (typeof window !== 'undefined') {
   window.__foldApp = Object.assign(app, {
-    requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError')
+    requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError'),
+    generateImposition, confirmImposition, clearImposition,
+    impositionEligibility, planPayload
   });
 }

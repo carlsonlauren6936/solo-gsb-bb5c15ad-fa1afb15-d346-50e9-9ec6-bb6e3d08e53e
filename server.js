@@ -28,12 +28,40 @@ app.post('/api/simulate', (req, res) => {
       ? Math.max(0, Math.min(req.body.upto, plan.steps.length))
       : plan.steps.length;
     const { state, error } = E.replay(plan.rows, plan.cols, plan.labels, plan.steps, upto);
+    const seqInfo = E.pageSequence(state);
+
+    // 可选：自动拼版（body.impose = {startPage, pageCount}）。
+    // 始终按全部步骤、空白标注计算，故仅在回放到最后一步时有意义。
+    let imposition = null;
+    let imposeError = null;
+    if (req.body && req.body.impose && typeof req.body.impose === 'object') {
+      const r = E.autoImpose({
+        rows: plan.rows,
+        cols: plan.cols,
+        steps: plan.steps,
+        startPage: req.body.impose.startPage,
+        pageCount: req.body.impose.pageCount,
+        existingLabels: plan.labels
+      });
+      if (r.ok) imposition = r;
+      else imposeError = r.error;
+    }
+
     res.json({
-      ok: !error,
+      ok: !error && !imposeError,
       upto,
       error: error || null,
-      stacks: E.pageSequence(state).stacks,
-      folded: E.pageSequence(state).folded,
+      imposeError,
+      stacks: seqInfo.stacks,
+      folded: seqInfo.folded,
+      imposition: imposition && {
+        startPage: imposition.startPage,
+        pageCount: imposition.pageCount,
+        capacity: imposition.capacity,
+        slots: imposition.slots,
+        labels: imposition.labels,
+        overwrites: imposition.overwrites
+      },
       occupied: Object.keys(state.stacks).map((k) => {
         const [x, y] = k.split(',').map(Number);
         return {
@@ -105,6 +133,9 @@ app.delete('/api/plans/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`折页阅读顺序校样应用已启动： http://localhost:${PORT}`);
 });
+
+// 导出 HTTP server（便于测试中 close()；直接 `node server.js` 行为不变）
+module.exports = server;

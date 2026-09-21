@@ -183,6 +183,39 @@ button.fold { flex: 1 1 40%; min-width: 110px; font-weight: 600; }
 .plan-list li:last-child { border-bottom: none; }
 .plan-list button { padding: 2px 8px; font-size: 12px; }
 
+/* ---------- 自动拼版 ---------- */
+.impose-preview {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fafcff;
+}
+.impose-overwrite {
+  margin: 6px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.impose-overwrite .ow-head { color: #8a5a12; font-weight: 700; margin-bottom: 2px; }
+.impose-overwrite .ow-none { color: var(--ok); }
+.impose-overwrite ul { margin: 2px 0 0; padding-left: 18px; max-height: 110px; overflow: auto; }
+.impose-overwrite li { font-variant-numeric: tabular-nums; }
+.impose-table-wrap { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.impose-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.impose-table th, .impose-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 3px 6px;
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.impose-table th { position: sticky; top: 0; background: #eef4ff; color: #102a5c; z-index: 1; }
+.impose-table tr.blank-row td { color: var(--muted); background: #f6f7f9; }
+.impose-table tr.overwritten td { background: #fff7e8; }
+.impose-table .face-front { color: var(--primary); }
+.impose-table .face-back { color: #7b4ed0; }
+.impose-table .inverted-mark { color: var(--danger); }
+
 /* ---------- 弹层 ---------- */
 .modal {
   position: fixed; inset: 0;

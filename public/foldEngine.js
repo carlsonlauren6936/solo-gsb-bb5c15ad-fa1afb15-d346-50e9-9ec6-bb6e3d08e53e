@@ -288,6 +288,118 @@ function pageSequence(state) {
   return { stacks: out, folded: out.length === 1 };
 }
 
+/**
+ * 自动拼版：在“全部步骤合法且收成单叠”的前提下，按封面→封底的阅读
+ * 槽位依次填入连续页码，并反向映射到每个原始纸格的正、反面。
+ *
+ * 页码序列 startPage, startPage+1, …, startPage+pageCount-1 只写入前
+ * pageCount 个阅读槽位；pageCount < 总面数（2×格数）时，序列末尾的剩余
+ * 槽位留空（空白页）。
+ *
+ * 注意：拼版始终以“无现有标注”的重放结果计算槽位顺序（阅读槽位只由
+ * 行列与折叠步骤决定，与纸张上当前写了什么无关）；现有标注仅用于生成
+ * “将被覆盖的位置”汇总。
+ *
+ * @param {object} opts
+ *   rows, cols, steps, startPage, pageCount, existingLabels（可选，用于覆盖汇总）
+ * @returns 成功 { ok:true, startPage, pageCount, capacity, slots, labels, overwrites }
+ *          失败 { ok:false, error:{ code, message, conflicts? } }
+ *   slots[i] = { index, label:string|null, blank:boolean,
+ *                panelId:'x,y', face:'front'|'back', upright }
+ *   labels   = 可直接写回方案的 labels 对象（{ 'x,y': {front,back} }，全空格省略）
+ *   overwrites: 因拼版而内容发生变化的槽位汇总（用于确认前提示）
+ */
+function autoImpose(opts) {
+  const startPage = Math.floor(Number(opts && opts.startPage));
+  const pageCount = Math.floor(Number(opts && opts.pageCount));
+  if (!Number.isInteger(startPage) || startPage < 1) {
+    return fail('bad_start', '起始页码必须是不小于 1 的整数。');
+  }
+  if (!Number.isInteger(pageCount) || pageCount < 1) {
+    return fail('bad_count', '成品页数必须是不小于 1 的整数。');
+  }
+  const rows = Math.max(1, Math.floor(Number(opts.rows)));
+  const cols = Math.max(1, Math.floor(Number(opts.cols)));
+  const steps = Array.isArray(opts.steps) ? opts.steps : [];
+  const capacity = 2 * rows * cols;
+  if (pageCount > capacity) {
+    return fail('too_many', `成品页数 ${pageCount} 超出纸格总面数 ${capacity}（${rows}×${cols} 格 × 2 面）。`);
+  }
+
+  // 以空白标注重放全部步骤：先确保每步合法，再要求收成单叠
+  const { state, error } = replay(rows, cols, {}, steps);
+  if (error) {
+    return fail('illegal_fold',
+      `存在非法折叠：第 ${error.stepIndex + 1} 步（${error.message}），无法自动拼版。`,
+      error.conflicts);
+  }
+  const info = pageSequence(state);
+  if (!info.folded) {
+    return fail('not_single',
+      `尚未收成单叠：当前有 ${info.stacks.length} 个分离叠层，继续折叠到单叠后才能自动拼版。`);
+  }
+
+  const group = info.stacks[0];
+  const cellSlots = [];   // 每个面片朝上的面 = 序列前半（封面→书心）
+  group.leaves.forEach((leaf) => {
+    cellSlots.push({ panelId: leaf.panelId, face: leaf.upper.face, upright: leaf.upper.upright });
+  });
+  // 各面片朝下的面 = 序列后半（书心→封底），顺序相反
+  group.leaves.slice().reverse().forEach((leaf) => {
+    cellSlots.push({ panelId: leaf.panelId, face: leaf.lower.face, upright: leaf.lower.upright });
+  });
+
+  const slots = cellSlots.map((s, i) => {
+    const isPage = i < pageCount;
+    return {
+      index: i,
+      label: isPage ? String(startPage + i) : null,
+      blank: !isPage,
+      panelId: s.panelId,
+      face: s.face,
+      upright: s.upright
+    };
+  });
+
+  // 反向映射到原始纸格的正/反面
+  const labelsMap = {};
+  for (const slot of slots) {
+    if (!labelsMap[slot.panelId]) labelsMap[slot.panelId] = { front: '', back: '' };
+    labelsMap[slot.panelId][slot.face] = slot.label == null ? '' : slot.label;
+  }
+  const labels = {};
+  for (const [id, v] of Object.entries(labelsMap)) {
+    if (v.front || v.back) labels[id] = v;
+  }
+
+  // 覆盖汇总：与现有标注逐个槽位比对（未填即视为空白）
+  const existing = opts.existingLabels || {};
+  const overwrites = [];
+  for (const slot of slots) {
+    const cur = existing[slot.panelId] || {};
+    const currentVal = cur[slot.face] != null ? String(cur[slot.face]) : '';
+    const newVal = slot.label == null ? '' : slot.label;
+    if (currentVal !== newVal) {
+      overwrites.push({
+        slotIndex: slot.index,
+        panelId: slot.panelId,
+        face: slot.face,
+        from: currentVal,
+        to: newVal
+      });
+    }
+  }
+
+  return {
+    ok: true, startPage, pageCount, capacity,
+    slots, labels, overwrites
+  };
+
+  function fail(code, message, conflicts) {
+    return { ok: false, error: { code, message, conflicts: conflicts || [] } };
+  }
+}
+
 /** 方案校验/规整（载入 JSON 时使用） */
 function normalizePlan(plan) {
   const errors = [];
@@ -335,7 +447,7 @@ function normalizePlan(plan) {
 
 const api = {
   initialState, cloneState, validateFold, applyFold,
-  replay, visibleFace, pageSequence, normalizePlan, key
+  replay, visibleFace, pageSequence, normalizePlan, autoImpose, key
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

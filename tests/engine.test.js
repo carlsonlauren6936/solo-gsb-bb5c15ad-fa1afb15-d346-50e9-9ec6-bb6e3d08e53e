@@ -156,3 +156,159 @@ test('空白页码输出为 null', () => {
   const s = E.applyFold(E.initialState(1, 2), { axis: 'v', line: 1, dir: 'r' });
   assert.deepEqual(E.pageSequence(s).stacks[0].sequence, [null, null, null, null]);
 });
+
+// ---------- 自动拼版 ----------
+test('autoImpose：1×2 骑马钉，起始 1、4 页 → 反推各格正反面页码', () => {
+  const steps = [{ axis: 'v', line: 1, dir: 'r' }];
+  const r = E.autoImpose({ rows: 1, cols: 2, steps, startPage: 1, pageCount: 4 });
+  assert.equal(r.ok, true);
+  assert.equal(r.capacity, 4);
+  // 阅读槽位 1..4 连续填码
+  assert.deepEqual(r.slots.map((s) => s.label), ['1', '2', '3', '4']);
+  // 反向映射：0,0 正面=4 反面=1；1,0 正面=2 反面=3（与既有用例标注一致）
+  assert.deepEqual(r.labels['0,0'], { front: '4', back: '1' });
+  assert.deepEqual(r.labels['1,0'], { front: '2', back: '3' });
+});
+
+test('autoImpose：每个槽位都带原始纸格 id 与面别、朝向，可直接反向定位', () => {
+  const steps = [{ axis: 'v', line: 1, dir: 'r' }];
+  const r = E.autoImpose({ rows: 1, cols: 2, steps, startPage: 1, pageCount: 4 });
+  const byCell = {};
+  for (const s of r.slots) {
+    (byCell[s.panelId] = byCell[s.panelId] || []).push(s);
+    assert.ok(['front', 'back'].includes(s.face));
+    assert.equal(typeof s.upright, 'boolean');
+  }
+  // 每个原始纸格的正、反面各出现一次
+  for (const id of ['0,0', '1,0']) {
+    const faces = byCell[id].map((s) => s.face).sort();
+    assert.deepEqual(faces, ['back', 'front']);
+  }
+});
+
+test('autoImpose：2×2 八页折帖，页码 1..8 反推后回放恰为连续阅读顺序', () => {
+  const steps = [
+    { axis: 'v', line: 1, dir: 'r' },
+    { axis: 'h', line: 1, dir: 'd' }
+  ];
+  const r = E.autoImpose({ rows: 2, cols: 2, steps, startPage: 1, pageCount: 8 });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.slots.map((s) => s.label),
+    ['1', '2', '3', '4', '5', '6', '7', '8']);
+  // 强校验：把反推得到的 labels 放回引擎重放，阅读槽位必须严格 1..8
+  const rep = E.replay(2, 2, r.labels, steps);
+  assert.equal(rep.error, null);
+  assert.deepEqual(E.pageSequence(rep.state).stacks[0].sequence,
+    ['1', '2', '3', '4', '5', '6', '7', '8']);
+});
+
+test('autoImpose：支持非 1 起始页码（起始 9 → 9..12）', () => {
+  const r = E.autoImpose({
+    rows: 1, cols: 2,
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    startPage: 9, pageCount: 4
+  });
+  assert.deepEqual(r.slots.map((s) => s.label), ['9', '10', '11', '12']);
+  assert.deepEqual(r.labels['1,0'], { front: '10', back: '11' });
+});
+
+test('autoImpose：页数小于容量时末尾槽位空白并标记 blank/纸格/面', () => {
+  const r = E.autoImpose({
+    rows: 1, cols: 2,
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    startPage: 1, pageCount: 2
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.slots[0].blank, false);
+  assert.equal(r.slots[1].label, '2');
+  assert.equal(r.slots[2].blank, true);
+  assert.equal(r.slots[2].label, null);
+  assert.equal(r.slots[3].blank, true);
+  assert.ok(r.slots[2].panelId);
+  assert.ok(r.slots[3].panelId);
+  assert.ok(['front', 'back'].includes(r.slots[3].face));
+  // 只有前 2 页写入 labels，留空面保持空串
+  const vals = Object.values(r.labels).flatMap((v) => [v.front, v.back]);
+  assert.deepEqual(vals.sort(), ['', '', '1', '2']);
+});
+
+test('autoImpose：页数超出容量被拒，原因含容量数值', () => {
+  const r = E.autoImpose({
+    rows: 1, cols: 2,
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    startPage: 1, pageCount: 5
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'too_many');
+  assert.match(r.error.message, /超出纸格总面数 4/);
+});
+
+test('autoImpose：起始页码/页数非法被拒', () => {
+  const steps = [{ axis: 'v', line: 1, dir: 'r' }];
+  assert.equal(E.autoImpose({ rows: 1, cols: 2, steps, startPage: 0, pageCount: 4 }).error.code, 'bad_start');
+  assert.equal(E.autoImpose({ rows: 1, cols: 2, steps, startPage: 1, pageCount: 0 }).error.code, 'bad_count');
+  assert.equal(E.autoImpose({ rows: 1, cols: 2, steps, startPage: -2, pageCount: 4 }).error.code, 'bad_start');
+  assert.equal(E.autoImpose({ rows: 1, cols: 2, steps, startPage: 'x', pageCount: 4 }).error.code, 'bad_start');
+});
+
+test('autoImpose：存在非法折叠时禁用并给出具体原因与冲突格', () => {
+  const steps = [
+    { axis: 'v', line: 1, dir: 'r' },
+    { axis: 'v', line: 2, dir: 'l' }   // 1×3 厚度冲突
+  ];
+  const r = E.autoImpose({ rows: 1, cols: 3, steps, startPage: 1, pageCount: 4 });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'illegal_fold');
+  assert.match(r.error.message, /第 2 步/);
+  assert.deepEqual(r.error.conflicts, ['2,0', '1,0']);
+});
+
+test('autoImpose：未收成单叠时禁用并给出叠层数', () => {
+  // 2×2 只折一次 → 两个分离叠层
+  const r = E.autoImpose({
+    rows: 2, cols: 2,
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    startPage: 1, pageCount: 8
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'not_single');
+  assert.match(r.error.message, /2 个分离叠层/);
+});
+
+test('autoImpose：1×1 零步本身即单叠，正反两槽', () => {
+  const r = E.autoImpose({ rows: 1, cols: 1, steps: [], startPage: 1, pageCount: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.capacity, 2);
+  assert.deepEqual(r.slots.map((s) => s.label), ['1', '2']);
+  assert.deepEqual(r.labels['0,0'], { front: '1', back: '2' });
+});
+
+test('autoImpose：覆盖汇总逐个面列出（现有标注非空）', () => {
+  // 现有标注全部写 9：4 个面都会被覆盖；其中页数=2 时另两个面被清空
+  const existing = {
+    '0,0': { front: '9', back: '9' },
+    '1,0': { front: '9', back: '9' }
+  };
+  const steps = [{ axis: 'v', line: 1, dir: 'r' }];
+  const full = E.autoImpose({ rows: 1, cols: 2, steps, startPage: 1, pageCount: 4, existingLabels: existing });
+  assert.equal(full.overwrites.length, 4);
+  const byKey = Object.fromEntries(full.overwrites.map((o) => [`${o.panelId}:${o.face}`, o]));
+  assert.equal(byKey['0,0:back'].to, '1');
+  assert.equal(byKey['0,0:back'].from, '9');
+
+  const partial = E.autoImpose({ rows: 1, cols: 2, steps, startPage: 1, pageCount: 2, existingLabels: existing });
+  // 槽位 3、4 被清空
+  const cleared = partial.overwrites.filter((o) => o.to === '');
+  assert.equal(cleared.length, 2);
+  cleared.forEach((o) => assert.equal(o.from, '9'));
+});
+
+test('autoImpose：现有标注与拼版结果一致时覆盖汇总为空', () => {
+  const labels = { '0,0': { front: '4', back: '1' }, '1,0': { front: '2', back: '3' } };
+  const r = E.autoImpose({
+    rows: 1, cols: 2,
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    startPage: 1, pageCount: 4, existingLabels: labels
+  });
+  assert.equal(r.overwrites.length, 0);
+});
