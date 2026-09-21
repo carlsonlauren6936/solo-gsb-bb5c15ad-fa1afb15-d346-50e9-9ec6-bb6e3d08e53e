@@ -19,6 +19,7 @@ function makeEl(id) {
     dispatch(t, ev = {}) { (listeners[t] || []).forEach((fn) => fn(ev)); },
     appendChild() {}, querySelector() { return makeEl('q'); },
     querySelectorAll() { return []; },
+    removeAttribute() {}, setAttribute() {},
     classList: { add() {}, remove() {}, contains() { return false; } },
     getContext: () => ({
       setTransform() {}, clearRect() {}, save() {}, restore() {},
@@ -41,7 +42,9 @@ const ids = ['rowsInput', 'colsInput', 'createGridBtn', 'axisSelect', 'lineSelec
   'deletePlanBtn', 'planList', 'saveMsg', 'firstBtn', 'prevBtn', 'playBtn', 'nextBtn',
   'stepSlider', 'stepLabel', 'statusBadge', 'board', 'canvasHint', 'stepList',
   'delStepBtn', 'clearStepsBtn', 'orientInfo', 'sequenceBox', 'foldState',
-  'cellEditor', 'editorOrigin', 'editorRows', 'editorCancel', 'editorOk', 'planName'];
+  'cellEditor', 'editorOrigin', 'editorRows', 'editorCancel', 'editorOk', 'planName',
+  'imposeStart', 'imposeCount', 'imposePreviewBtn', 'imposeStatus', 'imposePreview',
+  'imposeSummary', 'imposeOverwrite', 'imposeRows', 'imposeCancelBtn', 'imposeConfirmBtn'];
 const els = Object.fromEntries(ids.map((id) => [id, makeEl(id)]));
 els.rowsInput.value = '2';
 els.colsInput.value = '2';
@@ -116,5 +119,79 @@ assert.equal(ui.plan.steps.length, 1, '厚度冲突步应被拒绝');
 assert.ok(els.foldError.textContent.includes('厚度不一致'));
 assert.ok(ui.replay.error.code === 'thickness');
 assert.deepEqual(ui.replay.error.conflicts, ['2,0', '1,0']);
+
+// ---------- 自动拼版 ----------
+// 非法折叠场景：生成被禁用
+assert.equal(ui.imposition.eligible.ok, false);
+assert.equal(ui.imposition.eligible.code, 'thickness');
+assert.equal(els.imposePreviewBtn.disabled, true);
+assert.ok(els.imposeStatus.textContent.includes('禁用生成'));
+
+// 未收成单叠场景（2×3 只折一次）
+els.rowsInput.value = '2'; els.colsInput.value = '3';
+els.createGridBtn.dispatch('click');
+ui.requestStep({ axis: 'v', line: 1, dir: 'r' });
+assert.equal(ui.imposition.eligible.ok, false);
+assert.equal(ui.imposition.eligible.code, 'not_single_stack');
+assert.equal(els.imposePreviewBtn.disabled, true);
+
+// 合法 2×2 折帖：v1 右折 + h1 下折，收成 8 面单叠
+els.rowsInput.value = '2'; els.colsInput.value = '2';
+els.createGridBtn.dispatch('click');
+ui.requestStep({ axis: 'v', line: 1, dir: 'r' });
+ui.requestStep({ axis: 'h', line: 1, dir: 'd' });
+assert.equal(ui.imposition.eligible.ok, true);
+assert.equal(ui.imposition.eligible.capacity, 8);
+assert.equal(els.imposePreviewBtn.disabled, false);
+
+// 页数超出容量：引擎拒绝，不出预览
+els.imposeStart.value = '1';
+els.imposeCount.value = '9';
+els.imposePreviewBtn.dispatch('click');
+assert.equal(ui.imposition.result, null);
+assert.ok(els.imposeStatus.textContent.includes('超出纸格总面数'));
+assert.equal(els.imposePreview.hidden, true);
+
+// 生成预览：不得直接改动当前标注
+els.imposeCount.value = '8';
+els.imposePreviewBtn.dispatch('click');
+assert.ok(ui.imposition.result && ui.imposition.result.ok);
+assert.deepEqual(ui.plan.labels, {}, '预览阶段标注不得被修改');
+assert.equal(els.imposePreview.hidden, false);
+assert.equal(ui.imposition.result.blankTrailing, 0);
+
+// 确认写入后：阅读序列为连续 1..8，反向映射正确（1×2 例与手工标注一致）
+els.imposeConfirmBtn.dispatch('click');
+const imposedSeq = E.pageSequence(ui.replay.state).stacks[0].sequence;
+assert.deepEqual(imposedSeq, ['1', '2', '3', '4', '5', '6', '7', '8']);
+assert.deepEqual(ui.plan.labels['0,1'], { front: '6', back: '3' });
+
+// 部分页数 4：末尾 4 槽空白，被空白的面在预览中可定位
+ui.plan.labels = {};
+ui.render();
+els.imposeCount.value = '4';
+els.imposePreviewBtn.dispatch('click');
+assert.equal(ui.imposition.result.blankTrailing, 4);
+const blankSlots = ui.imposition.result.slots.filter((s) => s.blank);
+assert.equal(blankSlots.length, 4);
+assert.ok(blankSlots.every((s) => s.origin && s.face));
+
+// 现有标注非空：确认前覆盖汇总非空（confirm 在桩中返回 false，不会误写入）
+ui.plan.labels = { '0,0': { front: '99', back: '98' } };
+ui.render();
+els.imposePreviewBtn.dispatch('click');
+assert.equal(els.imposeOverwrite.hidden, false);
+assert.ok(els.imposeOverwrite.textContent.includes('0,0'));
+els.imposeConfirmBtn.dispatch('click');
+assert.equal(ui.plan.labels['0,0'].front, '99', '未确认时不得覆盖现有标注');
+
+// 确认后旧预览作废：再改回干净标注、重新确认（绕过 confirm 直接调用）
+ui.plan.labels = {};
+ui.render();
+els.imposeCount.value = '8';
+els.imposePreviewBtn.dispatch('click');
+ui.confirmImposition();   // 无现有标注，不弹确认框
+assert.deepEqual(E.pageSequence(ui.replay.state).stacks[0].sequence,
+  ['1', '2', '3', '4', '5', '6', '7', '8']);
 
 console.log('前端冒烟流程全部通过');

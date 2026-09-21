@@ -15,7 +15,8 @@ const app = {
   hitHandles: [],           // 画布折叠手柄
   hoverHandle: null,
   editingCell: null,
-  playTimer: null
+  playTimer: null,
+  imposition: { eligible: null, result: null, sig: null }   // 自动拼版状态
 };
 
 const $ = (id) => document.getElementById(id);
@@ -51,6 +52,12 @@ function init() {
 
   $('editorCancel').addEventListener('click', () => $('cellEditor').hidden = true);
   $('editorOk').addEventListener('click', commitEditor);
+
+  $('imposePreviewBtn').addEventListener('click', previewImposition);
+  $('imposeConfirmBtn').addEventListener('click', confirmImposition);
+  $('imposeCancelBtn').addEventListener('click', closeImposition);
+  $('imposeStart').addEventListener('input', renderImposition);
+  $('imposeCount').addEventListener('input', renderImposition);
 
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
@@ -183,6 +190,7 @@ function render() {
   renderSteps();
   renderSequence();
   renderControls();
+  renderImposition();
 }
 
 function renderControls() {
@@ -600,6 +608,159 @@ function commitEditor() {
   render();
 }
 
+// ---------- 自动拼版 ----------
+/** 方案几何签名：网格、标注或折叠步骤变化后旧预览即失效（回放到不同步不影响）。 */
+function planSignature() {
+  return JSON.stringify({
+    r: app.plan.rows, c: app.plan.cols,
+    l: app.plan.labels, s: app.plan.steps
+  });
+}
+
+function readImposeInputs() {
+  return { start: Number($('imposeStart').value), count: Number($('imposeCount').value) };
+}
+
+/** 渲染拼版卡片：可用状态、禁用原因、预览内容。 */
+function renderImposition() {
+  if (!app.plan.rows) {
+    app.imposition.eligible = null;
+    $('imposePreviewBtn').disabled = true;
+    $('imposeStatus').textContent = '先在左侧创建行列纸格并完成折叠。';
+    $('imposeStatus').className = 'hint';
+    $('imposePreview').hidden = true;
+    app.imposition.result = null;
+    return;
+  }
+  const elig = E.impositionEligibility(
+    app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps);
+  app.imposition.eligible = elig;
+
+  const countInput = $('imposeCount');
+  if (elig.ok) {
+    countInput.max = String(elig.capacity);
+    if (!countInput.placeholder) countInput.placeholder = String(elig.capacity);
+    $('imposePreviewBtn').disabled = false;
+    $('imposeStatus').textContent = `可拼版：容量 ${elig.capacity} 面（${app.plan.rows}×${app.plan.cols} 格 × 正反 2 面）。`;
+    $('imposeStatus').className = 'hint impose-status-ok';
+  } else {
+    countInput.removeAttribute('max');
+    $('imposePreviewBtn').disabled = true;
+    const why = elig.code === 'not_single_stack'
+      ? `未收成单叠：${elig.message}`
+      : `禁用生成：${elig.message}`;
+    $('imposeStatus').textContent = why;
+    $('imposeStatus').className = 'hint impose-status-err';
+    closeImposition();
+    return;
+  }
+
+  // 旧预览的方案已被改动 → 作废
+  if (app.imposition.result && app.imposition.sig !== planSignature()) {
+    closeImposition();
+  }
+  if (app.imposition.result) renderImpositionPreview(app.imposition.result);
+}
+
+function closeImposition() {
+  app.imposition.result = null;
+  app.imposition.sig = null;
+  $('imposePreview').hidden = true;
+}
+
+/** 点击“生成预览”：仅计算并展示，绝不直接改写当前标注。 */
+function previewImposition() {
+  const { start, count } = readImposeInputs();
+  const result = E.autoImpose(
+    app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps, start, count);
+  if (!result.ok) {
+    closeImposition();
+    $('imposeStatus').textContent = '禁用生成：' + result.message;
+    $('imposeStatus').className = 'hint impose-status-err';
+    return;
+  }
+  app.imposition.result = result;
+  app.imposition.sig = planSignature();
+  $('imposePreview').hidden = false;
+  renderImpositionPreview(result);
+}
+
+function faceText(face) {
+  return face === 'front'
+    ? '<span class="imp-face-front">正面</span>'
+    : '<span class="imp-face-back">反面</span>';
+}
+
+function renderImpositionPreview(result) {
+  // 摘要
+  const blankNote = result.blankTrailing > 0
+    ? `；末尾 ${result.blankTrailing} 个槽位为空白（已标明所属纸格与面）`
+    : '';
+  $('imposeSummary').innerHTML =
+    `将向封面→封底共 <b>${result.capacity}</b> 个阅读槽位填入页码 ` +
+    `<b>${result.startPage}–${result.startPage + result.pageCount - 1}</b>` +
+    `（${result.pageCount} 页）${blankNote}。预览不会改动当前标注，确认后才批量写入。`;
+
+  // 覆盖汇总（现有标注非空时）
+  const overwrites = E.impositionOverwrite(app.plan.labels, result);
+  const ovBox = $('imposeOverwrite');
+  if (overwrites.length) {
+    ovBox.hidden = false;
+    const faceName = { front: '正面', back: '反面' };
+    const lines = overwrites.map((o) => {
+      const target = o.blanked ? '<b>空白</b>' : `“${escapeHtml(o.to)}”`;
+      return `格(${o.cell}) ${faceName[o.face]}：“${escapeHtml(o.from)}” → ${target}`;
+    });
+    ovBox.innerHTML = `⚠ 确认后将覆盖 ${overwrites.length} 处现有标注：<br>${lines.join('<br>')}`;
+  } else {
+    ovBox.hidden = true;
+    ovBox.textContent = '';
+  }
+
+  // 槽位表
+  const tbody = $('imposeRows');
+  tbody.innerHTML = '';
+  result.slots.forEach((s, i) => {
+    const tr = document.createElement('tr');
+    if (s.blank) tr.className = 'blank-slot';
+    if (i === 0) tr.classList.add('slot-cover');
+    if (i === result.slots.length - 1) tr.classList.add('slot-backcover');
+    const posName = i === 0 ? '槽 1（封面）'
+      : i === result.slots.length - 1 ? `槽 ${i + 1}（封底）`
+      : `槽 ${i + 1}`;
+    const pageCell = s.blank
+      ? '<span class="muted">空白</span>'
+      : `<span class="imp-page">${escapeHtml(s.page)}</span>`;
+    const upright = s.upright
+      ? '正立'
+      : '<span class="imp-inv" title="页码倒置 180°">⟲ 倒排</span>';
+    tr.innerHTML =
+      `<td>${posName}</td>` +
+      `<td>${pageCell}</td>` +
+      `<td>格(${s.origin}) · ${faceText(s.face)}</td>` +
+      `<td>${upright}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+/** 用户确认后批量写入（仅在此刻改写 labels）。 */
+function confirmImposition() {
+  const result = app.imposition.result;
+  if (!result || app.imposition.sig !== planSignature()) return;
+  const overwrites = E.impositionOverwrite(app.plan.labels, result);
+  if (overwrites.length) {
+    const faceName = { front: '正面', back: '反面' };
+    const detail = overwrites.map((o) =>
+      `格(${o.cell}) ${faceName[o.face]} “${o.from}”→${o.blanked ? '空白' : '“' + o.to + '”'}`).join('\n');
+    if (!confirm(`以下 ${overwrites.length} 处现有标注将被覆盖：\n${detail}\n\n确认写入自动拼版页码？`)) return;
+  }
+  app.plan.labels = JSON.parse(JSON.stringify(result.labels));
+  closeImposition();
+  setUpto(app.upto, true);
+  $('saveMsg').textContent =
+    `已按自动拼版写入 ${result.pageCount} 个页码（${result.blankTrailing} 个尾部槽位留空），记得保存方案。`;
+}
+
 // ---------- 错误提示 ----------
 function showFoldError(err) {
   const box = $('foldError');
@@ -722,6 +883,8 @@ init();
 // 暴露给自动化检查（浏览器中无害）
 if (typeof window !== 'undefined') {
   window.__foldApp = Object.assign(app, {
-    requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError')
+    requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError'),
+    previewImposition, confirmImposition, closeImposition, renderImposition,
+    readImposeInputs
   });
 }

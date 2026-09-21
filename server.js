@@ -54,6 +54,43 @@ app.post('/api/simulate', (req, res) => {
   }
 });
 
+// ---------- 自动拼版 ----------
+app.post('/api/impose', (req, res) => {
+  try {
+    const plan = E.normalizePlan(req.body || {});
+    const result = E.autoImpose(
+      plan.rows, plan.cols, plan.labels, plan.steps,
+      req.body && req.body.startPage,
+      req.body && req.body.pageCount
+    );
+    if (!result.ok) {
+      return res.json({
+        ok: false,
+        error: {
+          code: result.code,
+          message: result.message,
+          capacity: result.capacity,
+          stepIndex: result.stepIndex,
+          conflicts: result.conflicts,
+          stackCount: result.stackCount
+        }
+      });
+    }
+    res.json({
+      ok: true,
+      startPage: result.startPage,
+      pageCount: result.pageCount,
+      capacity: result.capacity,
+      blankTrailing: result.blankTrailing,
+      labels: result.labels,
+      slots: result.slots,
+      overwrites: E.impositionOverwrite(plan.labels, result)
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
+  }
+});
+
 // ---------- 方案持久化 ----------
 function planFile(id) { return path.join(DATA_DIR, `${id}.json`); }
 
@@ -105,6 +142,10 @@ app.delete('/api/plans/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`折页阅读顺序校样应用已启动： http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`折页阅读顺序校样应用已启动： http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

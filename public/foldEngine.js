@@ -288,6 +288,168 @@ function pageSequence(state) {
   return { stacks: out, folded: out.length === 1 };
 }
 
+/**
+ * 自动拼版
+ * --------
+ * 仅当方案“全部步骤可合法回放且收成单叠”时才可用：
+ * 按最终封面→封底的阅读槽位（pageSequence 单叠序列）依次写入连续页码，
+ * 再反向映射到每个原始纸格（ox,oy）的正面/反面，得到一份新的 labels。
+ *
+ * - startPage：成品起始页码（≥1 整数）；
+ * - pageCount：成品页数（≥1 且不超过纸格总面数 2×rows×cols）；
+ * - 序列末尾的剩余槽位留空白（pageCount < 容量时），
+ *   空白槽位仍会在 slots 中返回，并标明所属原始纸格与面。
+ */
+
+/** 计算自动拼版前置状态：网格合法 + 全步回放无冲突 + 收成单叠。 */
+function impositionEligibility(rows, cols, labels, steps) {
+  rows = Number(rows); cols = Number(cols);
+  if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+    return {
+      ok: false,
+      code: 'bad_grid',
+      message: '尚未创建合法的行列纸格（行数、列数都须为正整数）。',
+      capacity: 0
+    };
+  }
+  const r = replay(rows, cols, labels || {}, Array.isArray(steps) ? steps : []);
+  if (r.error) {
+    const e = r.error;
+    return {
+      ok: false,
+      code: e.code === 'thickness' ? 'thickness' : 'contour',
+      stepIndex: e.stepIndex,
+      conflicts: e.conflicts,
+      message: `存在非法折叠（第 ${e.stepIndex + 1} 步：${e.message}），无法自动拼版。`,
+      capacity: 2 * rows * cols
+    };
+  }
+  const info = pageSequence(r.state);
+  if (!info.folded) {
+    return {
+      ok: false,
+      code: 'not_single_stack',
+      message: `折叠后仍有 ${info.stacks.length} 个分离叠层，尚未收成单叠，无法确定唯一阅读顺序。`,
+      stackCount: info.stacks.length,
+      capacity: 2 * rows * cols
+    };
+  }
+  return { ok: true, state: r.state, info, capacity: 2 * rows * cols };
+}
+
+/**
+ * 生成自动拼版结果（不改写任何现有标注）。
+ * @returns 成功 {
+ *   ok:true, startPage, pageCount, capacity, blankTrailing,
+ *   labels: { "x,y": {front,back} },   // 两面皆空的纸格被省略
+ *   slots: [{ slot, panelId, origin:"x,y", face:'front'|'back',
+ *             page:String|null, blank, upright, position:'upper'|'lower' }]
+ * }
+ * 失败 { ok:false, code, message, ... }
+ */
+function autoImpose(rows, cols, labels, steps, startPage, pageCount) {
+  const elig = impositionEligibility(rows, cols, labels, steps);
+  if (!elig.ok) return elig;
+
+  startPage = Number(startPage);
+  pageCount = Number(pageCount);
+  if (!Number.isInteger(startPage) || startPage < 1) {
+    return { ok: false, code: 'bad_start', message: '起始页码须为不小于 1 的整数。', capacity: elig.capacity };
+  }
+  if (!Number.isInteger(pageCount) || pageCount < 1) {
+    return { ok: false, code: 'bad_count', message: '成品页数须为不小于 1 的整数。', capacity: elig.capacity };
+  }
+  if (pageCount > elig.capacity) {
+    return {
+      ok: false,
+      code: 'too_many_pages',
+      message: `成品页数 ${pageCount} 超出纸格总面数（容量 ${elig.capacity} 面 = ${rows}×${cols} 格 × 正反 2 面）。`,
+      capacity: elig.capacity
+    };
+  }
+
+  const grp = elig.info.stacks[0];
+  const leafCount = grp.leaves.length;
+  const slots = [];
+  // 正向：封面起自上而下各叶“朝上”面；到达最内片后反向取各叶“朝下”面
+  for (let i = 0; i < leafCount; i++) {
+    const leaf = grp.leaves[i];
+    slots.push({
+      slot: slots.length, leafIndex: i, position: 'upper',
+      panelId: leaf.panelId, face: leaf.upper.face,
+      upright: !!leaf.upper.upright
+    });
+  }
+  for (let i = leafCount - 1; i >= 0; i--) {
+    const leaf = grp.leaves[i];
+    slots.push({
+      slot: slots.length, leafIndex: i, position: 'lower',
+      panelId: leaf.panelId, face: leaf.lower.face,
+      upright: !!leaf.lower.upright
+    });
+  }
+
+  // 生成连续页码，超出成品页数的末尾槽位留空白
+  slots.forEach((s) => {
+    if (s.slot < pageCount) {
+      s.page = String(startPage + s.slot);
+      s.blank = false;
+    } else {
+      s.page = null;
+      s.blank = true;
+    }
+  });
+
+  // 反向映射到原始纸格正面/反面
+  const next = {};
+  const panels = elig.state.panels;
+  for (const s of slots) {
+    const p = panels[s.panelId];
+    const origin = key(p.ox, p.oy);
+    s.origin = origin;
+    if (!next[origin]) next[origin] = { front: '', back: '' };
+    next[origin][s.face] = s.blank ? '' : s.page;
+  }
+
+  // 与现有标注惯例一致：两面皆空的纸格不写入 labels
+  const labelsOut = {};
+  for (const [k, v] of Object.entries(next)) {
+    if (v.front !== '' || v.back !== '') labelsOut[k] = { front: v.front, back: v.back };
+  }
+
+  return {
+    ok: true,
+    startPage,
+    pageCount,
+    capacity: elig.capacity,
+    blankTrailing: Math.max(0, elig.capacity - pageCount),
+    labels: labelsOut,
+    slots
+  };
+}
+
+/**
+ * 汇总“现有标注 → 自动拼版结果”之间会被覆盖/清空的位置。
+ * @returns [{ cell, face, from:string, to:string, blanked:boolean }]
+ *   仅包含现有标注非空、且写入后内容发生变化的面。
+ */
+function impositionOverwrite(labels, result) {
+  const out = [];
+  if (!result || !result.ok) return out;
+  const next = result.labels;
+  for (const [cell, v] of Object.entries(labels || {})) {
+    for (const face of ['front', 'back']) {
+      const from = v && v[face] != null ? String(v[face]) : '';
+      if (from === '') continue;
+      const to = (next[cell] && next[cell][face]) || '';
+      if (from !== to) {
+        out.push({ cell, face, from, to, blanked: to === '' });
+      }
+    }
+  }
+  return out;
+}
+
 /** 方案校验/规整（载入 JSON 时使用） */
 function normalizePlan(plan) {
   const errors = [];
@@ -335,7 +497,8 @@ function normalizePlan(plan) {
 
 const api = {
   initialState, cloneState, validateFold, applyFold,
-  replay, visibleFace, pageSequence, normalizePlan, key
+  replay, visibleFace, pageSequence, normalizePlan, key,
+  impositionEligibility, autoImpose, impositionOverwrite
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

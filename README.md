@@ -53,7 +53,16 @@ docker compose down
 5. **阅读顺序**：右侧“最终阅读顺序”按骑马钉式折帖叶序输出
    封面 → … → 封底的页码序列；倒置页码以红底标出，空白页显示“空白”。
    尚未收成单叠时，会分组列出每个分离叠层的序列。
-6. **保存 / 载入**：
+6. **自动拼版**：仅当**全部折叠步骤都可合法回放且已收成单叠**时，
+   右侧“自动拼版”卡片才允许输入**起始页码**与**成品页数**：
+   - 系统按最终封面→封底的阅读槽位依次写入连续页码，再反向映射到
+     每个原始纸格的正/反面；
+   - 成品页数小于纸格总面数（`行数×列数×2`）时，序列末尾的剩余槽位
+     留空白，预览表中逐行标明空白槽位所属的原始纸格与面；
+   - “生成预览”**不会改动当前标注**；确认后才批量写入；若现有标注非空，
+     确认前会汇总所有将被覆盖/清空的位置（写入前还会二次确认）；
+   - 非法折叠、未收成单叠或页数超出容量时，生成按钮禁用并给出具体原因。
+7. **保存 / 载入**：
    - “保存到服务器”将方案 JSON 存入容器数据卷，可通过“已存方案…”再次载入；
    - “导出 JSON / 导入 JSON”在本地文件与应用之间交换方案。
 
@@ -104,6 +113,9 @@ public/
   foldEngine.js        折叠模拟引擎（浏览器与服务端共用）
   app.js               Canvas 渲染、交互、回放、存取
 tests/engine.test.js   引擎单元测试（node --test）
+tests/imposition.test.js 自动拼版单元测试
+tests/api.test.js      /api/impose、/api/simulate 与方案存取的 HTTP 测试
+tests/ui-smoke.js      前端主流程冒烟（DOM 桩中加载 app.js）
 Dockerfile, docker-compose.yml
 ```
 
@@ -115,3 +127,11 @@ npm test
 
 服务端另有 `POST /api/simulate`（body 同方案 JSON，可用 `upto` 指定回放步数）返回
 叠层、面片朝向与阅读顺序，便于脚本化校验折手方案。
+
+`POST /api/impose` 在方案 JSON 之外附加 `startPage`、`pageCount`，返回自动拼版结果：
+`labels`（写回每个原始纸格正/反面的连续页码，两面皆空者省略）、
+`slots`（逐槽位的页码、空白标记、`origin` 原始纸格、`face` 面别、`upright` 朝向）、
+`capacity`、`blankTrailing` 以及 `overwrites`（将被覆盖的现有非空标注）。
+前置条件不满足时返回 `ok:false` 与具体错误码
+（`contour` / `thickness` / `not_single_stack` / `too_many_pages` / `bad_start` / `bad_count`）。
+自动生成的标签就是普通 `labels`，保存、导入导出与 `/api/simulate` 回放均原样保留。
